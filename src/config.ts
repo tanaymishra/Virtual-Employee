@@ -65,6 +65,29 @@ function loadProjects(projectsFile: string): ProjectConfig[] {
   return raw as ProjectConfig[];
 }
 
+// --- posix path helpers (config paths are always the Linux container's, e.g. /data/repos/...) ---
+function posixDirname(p: string): string {
+  const trimmed = p.replace(/\/+$/, "");
+  const i = trimmed.lastIndexOf("/");
+  return i <= 0 ? "/" : trimmed.slice(0, i);
+}
+function posixRelative(from: string, to: string): string {
+  const f = from.replace(/\/+$/, "");
+  if (to === f) return ".";
+  if (to.startsWith(f + "/")) return to.slice(f.length + 1);
+  return to; // not under `from` - fall back to the absolute path
+}
+
+const projects = loadProjects(process.env.PROJECTS_FILE || "./config/projects.json");
+
+/** The single folder that contains every project (the common parent of all project paths). In
+ *  "unified" mode Claude works here and sees all repos at once. Override with WORKSPACE_PATH. */
+function computeWorkspacePath(): string {
+  if (process.env.WORKSPACE_PATH) return process.env.WORKSPACE_PATH;
+  const parents = [...new Set(projects.map((p) => posixDirname(p.path)))];
+  return parents.length === 1 ? parents[0] : "/data/repos";
+}
+
 export const config = {
   whatsapp: {
     phoneNumberId: required("WHATSAPP_PHONE_NUMBER_ID"),
@@ -88,11 +111,50 @@ export const config = {
   server: {
     port: Number(process.env.PORT || 3000),
   },
+  // What the agent calls itself in conversation. Configurable so the same code can be a
+  // differently-named "employee".
+  agentName: process.env.AGENT_NAME || "Virtual Employee",
+  // "unified" (default): one folder with every repo, one continuous conversation, no routing -
+  //   Claude figures out which repo(s) a message is about, and can just chat.
+  // "project": route each message to a named project (mention its alias), one session per project.
+  workspaceMode: (process.env.WORKSPACE_MODE || "unified").toLowerCase() === "project" ? "project" : "unified",
+  workspacePath: computeWorkspacePath(),
   logFile: process.env.LOG_FILE || "./data/virtual-employee.log",
   stateFile: process.env.STATE_FILE || "./data/state.json",
-  projects: loadProjects(process.env.PROJECTS_FILE || "./config/projects.json"),
+  projects,
 };
 
 export function findProjectByAlias(alias: string): ProjectConfig | undefined {
   return config.projects.find((p) => p.alias.toLowerCase() === alias.toLowerCase());
+}
+
+/** A concrete thing Claude runs against: a working directory + the repos visible under it. */
+export interface WorkTarget {
+  cwd: string;
+  repos: MemberRepo[]; // subdir is relative to cwd
+  label: string; // for logs / the busy message
+  sessionKey: string; // key under which this target's Claude session id is stored
+}
+
+const WORKSPACE_SESSION_KEY = "__workspace__";
+
+/** Unified mode: the whole workspace, all repos, one shared session. */
+export function workspaceTarget(): WorkTarget {
+  const repos: MemberRepo[] = [];
+  for (const project of config.projects) {
+    for (const repo of project.repos) {
+      const abs = repo.subdir === "." ? project.path : `${project.path}/${repo.subdir}`;
+      repos.push({
+        name: repo.name,
+        subdir: posixRelative(config.workspacePath, abs), // e.g. "fixifit/frontend"
+        stagingBranch: repo.stagingBranch,
+      });
+    }
+  }
+  return { cwd: config.workspacePath, repos, label: "workspace", sessionKey: WORKSPACE_SESSION_KEY };
+}
+
+/** Project mode: a single project's folder and its member repos. */
+export function projectTarget(project: ProjectConfig): WorkTarget {
+  return { cwd: project.path, repos: project.repos, label: project.alias, sessionKey: project.alias };
 }

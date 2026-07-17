@@ -1,8 +1,8 @@
-import { config } from "./config";
+import { config, workspaceTarget, projectTarget, WorkTarget } from "./config";
 import { log } from "./logger";
 import { resolveProject } from "./projectRouter";
 import { runClaude, cancelActive } from "./claudeRunner";
-import { fetchProjectRepos } from "./git";
+import { fetchTargetRepos } from "./git";
 import { sendText } from "./whatsapp";
 import { stateStore, QueuedJob } from "./state";
 
@@ -58,30 +58,41 @@ export async function handleIncomingMessage(from: string, text: string, messageI
     return;
   }
 
-  // "/new" - start a fresh Claude session for a project (like /clear in Claude Code).
+  // "/new" - start a fresh Claude session (like /clear in Claude Code).
   const newMatch = text.match(NEW_PATTERN);
   if (newMatch) {
     const rest = newMatch[1]?.trim();
-    if (!rest) {
-      // Bare "/new": reset the currently-active project's session.
-      const last = stateStore.getLastProject();
-      if (last) {
-        stateStore.clearSession(last);
-        log("session_reset", { from, project: last });
-        await safeSend(from, `Started a fresh session for "${last}". Your next message begins a new conversation.`);
-      } else {
-        const aliases = config.projects.map((p) => p.alias).join(", ");
-        await safeSend(from, `No active project yet. Say e.g. "/new ${config.projects[0]?.alias ?? "project"}: <task>". Projects: ${aliases}`);
+
+    if (config.workspaceMode === "unified") {
+      // One shared conversation: reset it. Any text after "/new" then runs on the fresh session.
+      stateStore.clearSession(workspaceTarget().sessionKey);
+      log("session_reset", { from, mode: "unified" });
+      if (!rest) {
+        await safeSend(from, `Fresh start — I've cleared our conversation. What would you like to do?`);
+        return;
       }
-      return;
+      text = rest;
+    } else {
+      // Project mode: reset a specific project's session.
+      if (!rest) {
+        const last = stateStore.getLastProject();
+        if (last) {
+          stateStore.clearSession(last);
+          log("session_reset", { from, project: last });
+          await safeSend(from, `Started a fresh session for "${last}". Your next message begins a new conversation.`);
+        } else {
+          const aliases = config.projects.map((p) => p.alias).join(", ");
+          await safeSend(from, `No active project yet. Say e.g. "/new ${config.projects[0]?.alias ?? "project"}: <task>". Projects: ${aliases}`);
+        }
+        return;
+      }
+      const resolution = resolveProject(rest, stateStore.getLastProject());
+      if (resolution.kind === "resolved") {
+        stateStore.clearSession(resolution.project.alias);
+        log("session_reset", { from, project: resolution.project.alias });
+      }
+      text = rest;
     }
-    // "/new <task>": reset that project's session, then run the task fresh.
-    const resolution = resolveProject(rest, stateStore.getLastProject());
-    if (resolution.kind === "resolved") {
-      stateStore.clearSession(resolution.project.alias);
-      log("session_reset", { from, project: resolution.project.alias });
-    }
-    text = rest;
   }
 
   const stopMatch = text.match(STOP_PATTERN);
@@ -161,26 +172,36 @@ async function runLoop(): Promise<void> {
   }
 }
 
-async function processJob(job: QueuedJob): Promise<void> {
-  const resolution = resolveProject(job.text, stateStore.getLastProject());
+/** Resolve which target (workspace or a specific project) a job runs against. Returns null if the
+ *  job can't be routed yet (project mode only) - the reply has already been sent in that case. */
+async function resolveTarget(job: QueuedJob): Promise<WorkTarget | null> {
+  if (config.workspaceMode === "unified") {
+    // No routing: one shared workspace + conversation, Claude figures out the rest.
+    return workspaceTarget();
+  }
 
+  const resolution = resolveProject(job.text, stateStore.getLastProject());
   if (resolution.kind === "unknown") {
     const aliases = config.projects.map((p) => p.alias).join(", ");
     await safeSend(job.from, `Which project is this for? Mention one of: ${aliases}`);
-    return;
+    return null;
   }
   if (resolution.kind === "ambiguous") {
     await safeSend(job.from, `That could mean more than one project (${resolution.aliases.join(", ")}). Please specify.`);
-    return;
+    return null;
   }
+  stateStore.setLastProject(resolution.project.alias);
+  return projectTarget(resolution.project);
+}
 
-  const project = resolution.project;
-  stateStore.setLastProject(project.alias);
-  stateStore.setCurrentTask({ ...job, projectAlias: project.alias, startedAt: new Date().toISOString() });
+async function processJob(job: QueuedJob): Promise<void> {
+  const target = await resolveTarget(job);
+  if (!target) return; // couldn't route (project mode); user was already told
 
-  log("task_started", { from: job.from, project: project.alias, text: job.text });
+  stateStore.setCurrentTask({ ...job, projectAlias: target.label, startedAt: new Date().toISOString() });
+  log("task_started", { from: job.from, target: target.label, text: job.text });
 
-  await fetchProjectRepos(project);
+  await fetchTargetRepos(target);
 
   // Relay Claude's own messages to the user as they stream in, in order. We chain the sends so
   // they arrive sequentially without blocking the stream parser. No hardcoded "on it" ack -
@@ -190,13 +211,13 @@ async function processJob(job: QueuedJob): Promise<void> {
     sendChain = sendChain.then(() => safeSend(job.from, text));
   };
 
-  const priorSession = stateStore.getSession(project.alias);
-  const result = await runClaude(job.text, project, priorSession, relay);
+  const priorSession = stateStore.getSession(target.sessionKey);
+  const result = await runClaude(job.text, target, priorSession, relay);
   await sendChain; // make sure every streamed message has been sent before we finish up
 
   log("task_finished", {
     from: job.from,
-    project: project.alias,
+    target: target.label,
     ok: result.ok,
     cancelled: result.cancelled,
     relayedAny: result.relayedAny,
@@ -205,10 +226,10 @@ async function processJob(job: QueuedJob): Promise<void> {
   // Session bookkeeping: if a RESUME failed (not merely cancelled), drop the stored session so the
   // next message starts a clean one instead of repeatedly failing to resume a broken conversation.
   if (!result.ok && !result.cancelled && priorSession) {
-    stateStore.clearSession(project.alias);
-    log("session_cleared_after_failure", { project: project.alias });
+    stateStore.clearSession(target.sessionKey);
+    log("session_cleared_after_failure", { target: target.label });
   } else if (result.sessionId) {
-    stateStore.setSession(project.alias, result.sessionId);
+    stateStore.setSession(target.sessionKey, result.sessionId);
   }
 
   if (!result.cancelled) {

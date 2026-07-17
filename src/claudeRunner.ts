@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { ChildProcess, spawn } from "child_process";
-import { ProjectConfig, config } from "./config";
+import { WorkTarget, config } from "./config";
 import { log } from "./logger";
 
 export interface ClaudeResult {
@@ -15,35 +15,37 @@ export interface ClaudeResult {
 export type OnMessage = (text: string) => void;
 
 /** The persistent guardrails, injected via --append-system-prompt on every turn so they hold
- *  regardless of session state. Project-specific because it lists that project's member repos. */
-function buildSystemPrompt(project: ProjectConfig): string {
-  const repoLines = project.repos.map(
+ *  regardless of session state. Lists the repos visible under the target's working directory. */
+function buildSystemPrompt(target: WorkTarget): string {
+  const repoLines = target.repos.map(
     (r) => `- ${r.subdir}/ -> git repo "${r.name}", pull requests target its "${r.stagingBranch}" branch`
   );
   return [
-    `You are a Virtual Employee, an autonomous engineer reachable over WhatsApp, working inside the "${project.alias}" project.`,
+    `You are ${config.agentName}, an autonomous engineer reachable over WhatsApp.`,
     `Your working directory contains these git repos as subfolders:`,
     ...repoLines,
-    `This is an ongoing conversation: later messages are follow-ups to earlier ones. Continue prior`,
-    `work when relevant - check out the branch you were already using (its remotes have just been`,
-    `fetched for you) rather than starting over.`,
+    `Work out from the conversation which repo(s) a request is about - you don't need the human to`,
+    `name it every time. It's fine and expected to touch more than one repo in a single task`,
+    `(e.g. a backend change plus its frontend caller).`,
+    ``,
+    `This is an ongoing conversation: later messages are follow-ups. Continue prior work when`,
+    `relevant - check out the branch you were already using (remotes have just been fetched for`,
+    `you) rather than starting over.`,
     ``,
     `Hard rules, no exceptions:`,
     `- Never commit or push to "main" or any production branch in any repo. Branch protection will`,
     `  reject it anyway; do not use --force or attempt admin overrides.`,
     `- For each repo you change: work on a feature branch, then open (or update) a pull request`,
     `  targeting THAT repo's staging branch using the gh CLI.`,
-    `- It's fine and expected to touch more than one repo in a single task (e.g. a backend change`,
-    `  plus its frontend caller).`,
-    `- If the task is unclear or you get blocked, stop and say what you need instead of guessing.`,
+    `- If a request is unclear, ask a clarifying question instead of guessing.`,
     ``,
     `You are talking to a human over WhatsApp - every message you write is sent to them directly.`,
-    `So talk to them like a colleague on chat:`,
-    `- Open with a one-line acknowledgement of what you're about to do.`,
-    `- Send short progress notes at meaningful milestones (e.g. "found the bug in the auth handler",`,
-    `  "opening the PR now") - not every command, just the beats a human would care about.`,
+    `So talk like a colleague on chat:`,
+    `- Not every message is a coding task. If they just greet you, chat, or ask a question, reply`,
+    `  naturally and briefly - only start changing code when they actually ask for work.`,
+    `- When you do take on work: open with a one-line acknowledgement, send short progress notes at`,
+    `  meaningful milestones (not every command), and end with a brief summary + the PR URL(s).`,
     `- Keep each message short and conversational; no markdown headings, no step-by-step logs.`,
-    `- End with a brief summary of what changed in each repo and the PR URL(s).`,
   ].join("\n");
 }
 
@@ -124,11 +126,11 @@ export function cancelActive(): boolean {
  */
 export function runClaude(
   userText: string,
-  project: ProjectConfig,
+  target: WorkTarget,
   sessionId: string | null,
   onMessage: OnMessage
 ): Promise<ClaudeResult> {
-  const system = buildSystemPrompt(project);
+  const system = buildSystemPrompt(target);
   const generatedId = sessionId || crypto.randomUUID();
 
   // stream-json emits one JSON event per line as Claude works (assistant text, tool use, result),
@@ -152,7 +154,7 @@ export function runClaude(
 
   return new Promise((resolve) => {
     const child = spawn(config.claude.bin, args, {
-      cwd: project.path,
+      cwd: target.cwd,
       env: buildChildEnv(),
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -177,17 +179,17 @@ export function runClaude(
         for (const block of ev.message.content) {
           if (block?.type === "text" && block.text?.trim()) {
             relayedAny = true;
-            log("claude_message", { project: project.alias, text: block.text.slice(0, 400) });
+            log("claude_message", { target: target.label, text: block.text.slice(0, 400) });
             onMessage(block.text.trim());
           } else if (block?.type === "tool_use") {
             // Log tool activity for visibility, but don't spam the user with it.
-            log("claude_tool", { project: project.alias, tool: block.name });
+            log("claude_tool", { target: target.label, tool: block.name });
           }
         }
       } else if (ev?.type === "result") {
         finalResult = ev;
       } else if (ev?.type === "system") {
-        log("claude_system", { project: project.alias, subtype: ev.subtype });
+        log("claude_system", { target: target.label, subtype: ev.subtype });
       }
     };
 
@@ -196,10 +198,10 @@ export function runClaude(
       settled = true;
       child.kill("SIGKILL");
       clearActive();
-      log("claude_timeout", { project: project.alias });
+      log("claude_timeout", { target: target.label });
       resolve({
         ok: false,
-        summary: `Timed out after ${Math.round(config.claude.taskTimeoutMs / 1000)}s working on ${project.alias}.`,
+        summary: `Timed out after ${Math.round(config.claude.taskTimeoutMs / 1000)}s working on ${target.label}.`,
         sessionId: resolvedSessionId,
         relayedAny,
       });
@@ -226,7 +228,7 @@ export function runClaude(
       settled = true;
       clearTimeout(timer);
       clearActive();
-      log("claude_spawn_failed", { project: project.alias, error: String(err) });
+      log("claude_spawn_failed", { target: target.label, error: String(err) });
       resolve({ ok: false, summary: `Couldn't start Claude Code: ${err.message}`, sessionId: resolvedSessionId, relayedAny });
     });
 
@@ -247,7 +249,7 @@ export function runClaude(
       }
 
       log("claude_exit", {
-        project: project.alias,
+        target: target.label,
         code,
         cancelled: handle.cancelled,
         relayedAny,
@@ -256,7 +258,7 @@ export function runClaude(
       });
 
       if (handle.cancelled) {
-        resolve({ ok: false, cancelled: true, summary: `Stopped work on "${project.alias}" as requested.`, sessionId: resolvedSessionId, relayedAny });
+        resolve({ ok: false, cancelled: true, summary: `Stopped work on "${target.label}" as requested.`, sessionId: resolvedSessionId, relayedAny });
         return;
       }
 
@@ -269,7 +271,7 @@ export function runClaude(
           `exited with code ${code}`;
         resolve({
           ok: false,
-          summary: `Claude hit an error on "${project.alias}": ${String(detail).trim()}`.slice(0, 1500),
+          summary: `Claude hit an error on "${target.label}": ${String(detail).trim()}`.slice(0, 1500),
           sessionId: resolvedSessionId,
           relayedAny,
         });

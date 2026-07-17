@@ -18,6 +18,9 @@ services:
       GITHUB_TOKEN: ${GITHUB_TOKEN}
       # --- Claude Code headless auth (from `claude setup-token` on your machine) ---
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN}
+      # --- Agent identity & workspace ---
+      AGENT_NAME: ${AGENT_NAME:-Virtual Employee}
+      WORKSPACE_MODE: ${WORKSPACE_MODE:-unified}
       # --- Projects config, pasted as minified single-line JSON ---
       PROJECTS_JSON: ${PROJECTS_JSON}
       # --- Paths (leave as-is; they point at the persistent volume) ---
