@@ -1,0 +1,17 @@
+[
+  {
+    "alias": "fitdesk",
+    "path": "/home/agent/repos/fitdesk",
+    "repos": [
+      { "name": "tanaymishra/fitdesk-backend", "subdir": "backend", "stagingBranch": "staging" },
+      { "name": "tanaymishra/fitdesk-frontend", "subdir": "frontend", "stagingBranch": "staging" }
+    ]
+  },
+  {
+    "alias": "blog",
+    "path": "/home/agent/repos/blog",
+    "repos": [
+      { "name": "tanaymishra/blog", "subdir": ".", "stagingBranch": "staging" }
+    ]
+  }
+]

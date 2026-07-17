@@ -1,0 +1,15 @@
+[Unit]
+Description=Virtual Employee orchestrator (WhatsApp <-> Claude Code <-> GitHub)
+After=network.target
+
+[Service]
+Type=simple
+User=agent
+WorkingDirectory=/home/agent/Virtual-Employee
+EnvironmentFile=/home/agent/Virtual-Employee/.env
+ExecStart=/usr/bin/node dist/index.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
