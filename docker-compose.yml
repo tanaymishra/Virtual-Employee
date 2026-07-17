@@ -1,0 +1,37 @@
+# Dokploy "Compose" app for the Virtual Employee.
+# Set every value under `environment` in Dokploy's Environment tab (do NOT commit secrets here).
+# IMPORTANT: keep this a single instance - it's a stateful single-worker. Never scale replicas > 1.
+services:
+  virtual-employee:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      # --- WhatsApp Cloud API (all required) ---
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID}
+      WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN}
+      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN}
+      WHATSAPP_APP_SECRET: ${WHATSAPP_APP_SECRET}
+      ALLOWED_SENDER_NUMBERS: ${ALLOWED_SENDER_NUMBERS}
+      # --- GitHub bot auth (used for clone/push + gh PRs) ---
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      # --- Claude Code headless auth (from `claude setup-token` on your machine) ---
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN}
+      # --- Projects config, pasted as minified single-line JSON ---
+      PROJECTS_JSON: ${PROJECTS_JSON}
+      # --- Paths (leave as-is; they point at the persistent volume) ---
+      PROJECTS_FILE: /app/config/projects.json
+      STATE_FILE: /data/state.json
+      LOG_FILE: /data/virtual-employee.log
+      PORT: "3000"
+      CLAUDE_TASK_TIMEOUT_MS: "1800000"
+    volumes:
+      - ve-data:/data                 # cloned repos + state.json + log
+      - ve-claude:/home/node/.claude  # Claude sessions (needed for --resume across restarts)
+    expose:
+      - "3000"
+
+volumes:
+  ve-data:
+  ve-claude:
