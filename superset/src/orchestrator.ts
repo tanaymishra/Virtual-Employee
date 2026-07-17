@@ -1,0 +1,179 @@
+import { config } from "./config";
+import { log } from "./logger";
+import { resolveProject } from "./projectRouter";
+import { runClaude, cancelActive } from "./claudeRunner";
+import { fetchProjectRepos } from "./git";
+import { sendText } from "./whatsapp";
+import { stateStore, QueuedJob } from "./state";
+
+// Matches "stop"/"cancel"/"abort" (optionally "/stop"), optionally followed by a replacement
+// instruction, e.g. "stop, do X instead" -> group 2 captures "do X instead".
+const STOP_PATTERN = /^\s*\/?(stop|cancel|abort)\b[,:\s-]*(.*)$/i;
+
+// Meta delivers webhooks at-least-once; remember recent message ids to drop redeliveries.
+const recentMessageIds = new Set<string>();
+const RECENT_ID_CAP = 1000;
+
+function alreadySeen(messageId: string | undefined): boolean {
+  if (!messageId) return false;
+  if (recentMessageIds.has(messageId)) return true;
+  recentMessageIds.add(messageId);
+  if (recentMessageIds.size > RECENT_ID_CAP) {
+    const oldest = recentMessageIds.values().next().value;
+    if (oldest !== undefined) recentMessageIds.delete(oldest);
+  }
+  return false;
+}
+
+function isAllowed(from: string): boolean {
+  // No allow-list configured -> fail closed rather than open.
+  if (config.allowedSenders.length === 0) return false;
+  return config.allowedSenders.includes(from);
+}
+
+async function safeSend(to: string, body: string) {
+  try {
+    await sendText(to, body);
+  } catch (err) {
+    log("send_failed", { to, error: String(err) });
+  }
+}
+
+export async function handleIncomingMessage(from: string, text: string, messageId?: string): Promise<void> {
+  log("message_received", { from, text, messageId });
+
+  if (!isAllowed(from)) {
+    // Silent: unlisted numbers get no reply, so the bot isn't advertised to strangers.
+    log("message_ignored_unauthorized", { from });
+    return;
+  }
+
+  if (alreadySeen(messageId)) {
+    log("message_ignored_duplicate", { from, messageId });
+    return;
+  }
+
+  const stopMatch = text.match(STOP_PATTERN);
+  if (stopMatch) {
+    if (stateStore.isRunning()) {
+      await handleStop(from, stopMatch[2]?.trim());
+      return;
+    }
+    // Nothing running: if a real instruction followed "stop", treat it as a fresh task;
+    // otherwise just confirm there's nothing to stop.
+    if (!stopMatch[2]?.trim()) {
+      await safeSend(from, "Nothing's running right now.");
+      return;
+    }
+    text = stopMatch[2].trim();
+  }
+
+  const job: QueuedJob = { from, text, receivedAt: new Date().toISOString() };
+
+  if (stateStore.isRunning()) {
+    stateStore.enqueue(job);
+    const current = stateStore.getCurrentTask();
+    const desc = current ? `"${current.text}" (${current.projectAlias})` : "another task";
+    await safeSend(
+      from,
+      `Still working on ${desc}. I'll get to yours next (queue position: ${stateStore.queueLength()}). ` +
+        `Send "stop" if you started the current task and want to cancel it.`
+    );
+    return;
+  }
+
+  stateStore.enqueue(job);
+  runLoop().catch((err) => log("run_loop_failed", { error: String(err) }));
+}
+
+async function handleStop(from: string, replacementText: string | undefined): Promise<void> {
+  const current = stateStore.getCurrentTask();
+  if (!current) return; // isRunning() was true but between tasks; nothing concrete to cancel
+
+  if (current.from !== from) {
+    await safeSend(
+      from,
+      `Only the person who started the current task ("${current.projectAlias}") can stop it. ` +
+        `Send your own request and it'll be queued.`
+    );
+    return;
+  }
+
+  cancelActive();
+  log("task_cancelled_by_owner", { from, project: current.projectAlias });
+
+  if (replacementText) {
+    // Jump the replacement to the front so the drain loop runs it as soon as the killed turn unwinds.
+    stateStore.enqueueFront({ from, text: replacementText, receivedAt: new Date().toISOString() });
+    await safeSend(from, `Stopped what I was doing on "${current.projectAlias}". Starting your new request next.`);
+  } else {
+    await safeSend(from, `Stopped what I was doing on "${current.projectAlias}". Send me what you'd like next.`);
+  }
+}
+
+/**
+ * Drains the queue one job at a time. A single loop owns the "running" flag, so an unclear or
+ * rejected job no longer strands everything queued behind it - it just gets skipped and the loop
+ * moves on.
+ */
+async function runLoop(): Promise<void> {
+  if (stateStore.isRunning()) return; // re-entrancy guard
+  stateStore.setRunning(true);
+  try {
+    let job: QueuedJob | undefined;
+    while ((job = stateStore.dequeue())) {
+      await processJob(job);
+    }
+  } finally {
+    stateStore.setCurrentTask(null);
+    stateStore.setRunning(false);
+  }
+}
+
+async function processJob(job: QueuedJob): Promise<void> {
+  const resolution = resolveProject(job.text, stateStore.getLastProject());
+
+  if (resolution.kind === "unknown") {
+    const aliases = config.projects.map((p) => p.alias).join(", ");
+    await safeSend(job.from, `Which project is this for? Mention one of: ${aliases}`);
+    return;
+  }
+  if (resolution.kind === "ambiguous") {
+    await safeSend(job.from, `That could mean more than one project (${resolution.aliases.join(", ")}). Please specify.`);
+    return;
+  }
+
+  const project = resolution.project;
+  stateStore.setLastProject(project.alias);
+  stateStore.setCurrentTask({ ...job, projectAlias: project.alias, startedAt: new Date().toISOString() });
+
+  log("task_started", { from: job.from, project: project.alias, text: job.text });
+  await safeSend(job.from, `On it — working on "${project.alias}": ${job.text}`);
+
+  await fetchProjectRepos(project);
+
+  const priorSession = stateStore.getSession(project.alias);
+  const result = await runClaude(job.text, project, priorSession);
+
+  log("task_finished", {
+    from: job.from,
+    project: project.alias,
+    ok: result.ok,
+    cancelled: result.cancelled,
+  });
+
+  // Session bookkeeping: if a RESUME failed (not merely cancelled), drop the stored session so the
+  // next message starts a clean one instead of repeatedly failing to resume a broken conversation.
+  if (!result.ok && !result.cancelled && priorSession) {
+    stateStore.clearSession(project.alias);
+    log("session_cleared_after_failure", { project: project.alias });
+  } else if (result.sessionId) {
+    stateStore.setSession(project.alias, result.sessionId);
+  }
+
+  if (!result.cancelled) {
+    await safeSend(job.from, result.summary);
+  }
+
+  stateStore.setCurrentTask(null);
+}
