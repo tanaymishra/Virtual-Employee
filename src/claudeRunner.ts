@@ -62,6 +62,16 @@ function buildChildEnv(): NodeJS.ProcessEnv {
   for (const key of passthrough) {
     if (process.env[key]) env[key] = process.env[key];
   }
+
+  // Forward Claude Code's OWN auth/config (CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_CONFIG_DIR,
+  // ANTHROPIC_API_KEY, model/base-url overrides, ...). These are the agent's own credentials -
+  // NOT the WhatsApp secrets we deliberately withhold - so without them the child has no login.
+  for (const key of Object.keys(process.env)) {
+    if (key.startsWith("CLAUDE_") || key.startsWith("ANTHROPIC_")) {
+      env[key] = process.env[key];
+    }
+  }
+
   if (config.github.token) {
     env.GH_TOKEN = config.github.token;
     env.GITHUB_TOKEN = config.github.token;
