@@ -174,11 +174,14 @@ export function runClaude(
       settled = true;
       clearTimeout(timer);
       clearActive();
+      // Log BOTH streams (not just stderr) - in --output-format json mode Claude writes its
+      // error to stdout, so a stderr-only log hides the real cause.
       log("claude_exit", {
         project: project.alias,
         code,
         cancelled: handle.cancelled,
-        stderrTail: stderr.slice(-2000),
+        stdoutTail: stdout.slice(-3000),
+        stderrTail: stderr.slice(-3000),
       });
 
       if (handle.cancelled) {
@@ -191,23 +194,31 @@ export function runClaude(
         return;
       }
 
-      if (code !== 0) {
+      // Parse stdout regardless of exit code - Claude's JSON result carries is_error + a message.
+      let parsed: any = null;
+      try {
+        parsed = JSON.parse(stdout);
+      } catch {
+        /* not JSON (e.g. an early auth/CLI error printed as plain text) */
+      }
+      const returnedId = parsed?.session_id || generatedId;
+
+      if (code !== 0 || parsed?.is_error || parsed?.subtype === "error") {
+        const detail =
+          (parsed && (parsed.result || parsed.error || parsed.message)) ||
+          stderr.trim() ||
+          stdout.trim() ||
+          `exited with code ${code}`;
         resolve({
           ok: false,
-          summary: `Claude Code exited with an error while working on ${project.alias}. ${stderr.slice(-500) || ""}`.trim(),
-          sessionId: generatedId,
+          summary: `Claude hit an error on "${project.alias}": ${String(detail).trim()}`.slice(0, 1500),
+          sessionId: returnedId,
         });
         return;
       }
 
-      try {
-        const parsed = JSON.parse(stdout);
-        const summary = parsed?.result ?? parsed?.summary ?? stdout;
-        const returnedId = parsed?.session_id || generatedId;
-        resolve({ ok: true, summary: String(summary).trim(), sessionId: returnedId });
-      } catch {
-        resolve({ ok: true, summary: stdout.trim() || "Done, but no summary was returned.", sessionId: generatedId });
-      }
+      const summary = parsed?.result ?? parsed?.summary ?? stdout;
+      resolve({ ok: true, summary: String(summary).trim() || "Done (no summary returned).", sessionId: returnedId });
     });
   });
 }
