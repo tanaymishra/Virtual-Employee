@@ -8,7 +8,11 @@ export interface ClaudeResult {
   summary: string;
   cancelled?: boolean;
   sessionId?: string; // the session to resume next time for this project
+  relayedAny?: boolean; // whether any of Claude's messages were already streamed to the user
 }
+
+/** Callback used to relay Claude's own messages to the user as they stream in. */
+export type OnMessage = (text: string) => void;
 
 /** The persistent guardrails, injected via --append-system-prompt on every turn so they hold
  *  regardless of session state. Project-specific because it lists that project's member repos. */
@@ -32,8 +36,14 @@ function buildSystemPrompt(project: ProjectConfig): string {
     `- It's fine and expected to touch more than one repo in a single task (e.g. a backend change`,
     `  plus its frontend caller).`,
     `- If the task is unclear or you get blocked, stop and say what you need instead of guessing.`,
-    `- Finish with a short plain-English summary (2-5 sentences) of what changed in each repo and`,
-    `  the PR URL(s). It is sent to a human over WhatsApp, so keep it concise - no step-by-step log.`,
+    ``,
+    `You are talking to a human over WhatsApp - every message you write is sent to them directly.`,
+    `So talk to them like a colleague on chat:`,
+    `- Open with a one-line acknowledgement of what you're about to do.`,
+    `- Send short progress notes at meaningful milestones (e.g. "found the bug in the auth handler",`,
+    `  "opening the PR now") - not every command, just the beats a human would care about.`,
+    `- Keep each message short and conversational; no markdown headings, no step-by-step logs.`,
+    `- End with a brief summary of what changed in each repo and the PR URL(s).`,
   ].join("\n");
 }
 
@@ -115,16 +125,21 @@ export function cancelActive(): boolean {
 export function runClaude(
   userText: string,
   project: ProjectConfig,
-  sessionId: string | null
+  sessionId: string | null,
+  onMessage: OnMessage
 ): Promise<ClaudeResult> {
   const system = buildSystemPrompt(project);
   const generatedId = sessionId || crypto.randomUUID();
 
+  // stream-json emits one JSON event per line as Claude works (assistant text, tool use, result),
+  // so we can relay Claude's own messages live instead of a single blob at the end. --verbose is
+  // required by the CLI when combining -p with stream-json.
   const args = [
     "-p",
     userText,
     "--output-format",
-    "json",
+    "stream-json",
+    "--verbose",
     "--dangerously-skip-permissions",
     "--append-system-prompt",
     system,
@@ -136,8 +151,6 @@ export function runClaude(
   }
 
   return new Promise((resolve) => {
-    // stdin = "ignore" (/dev/null): a tool that tries to read stdin gets EOF and moves on, instead
-    // of blocking on an empty pipe forever with no human to type an answer.
     const child = spawn(config.claude.bin, args, {
       cwd: project.path,
       env: buildChildEnv(),
@@ -146,12 +159,36 @@ export function runClaude(
     const handle = { child, cancelled: false };
     active = handle;
 
-    let stdout = "";
+    let buffer = "";
     let stderr = "";
     let settled = false;
+    let relayedAny = false;
+    let resolvedSessionId = generatedId;
+    let finalResult: any = null;
 
     const clearActive = () => {
       if (active === handle) active = null;
+    };
+
+    const handleEvent = (ev: any) => {
+      if (ev?.session_id) resolvedSessionId = ev.session_id;
+
+      if (ev?.type === "assistant" && Array.isArray(ev.message?.content)) {
+        for (const block of ev.message.content) {
+          if (block?.type === "text" && block.text?.trim()) {
+            relayedAny = true;
+            log("claude_message", { project: project.alias, text: block.text.slice(0, 400) });
+            onMessage(block.text.trim());
+          } else if (block?.type === "tool_use") {
+            // Log tool activity for visibility, but don't spam the user with it.
+            log("claude_tool", { project: project.alias, tool: block.name });
+          }
+        }
+      } else if (ev?.type === "result") {
+        finalResult = ev;
+      } else if (ev?.type === "system") {
+        log("claude_system", { project: project.alias, subtype: ev.subtype });
+      }
     };
 
     const timer = setTimeout(() => {
@@ -162,12 +199,26 @@ export function runClaude(
       log("claude_timeout", { project: project.alias });
       resolve({
         ok: false,
-        summary: `Timed out after ${config.claude.taskTimeoutMs / 1000}s working on ${project.alias}.`,
-        sessionId: generatedId,
+        summary: `Timed out after ${Math.round(config.claude.taskTimeoutMs / 1000)}s working on ${project.alias}.`,
+        sessionId: resolvedSessionId,
+        relayedAny,
       });
     }, config.claude.taskTimeoutMs);
 
-    child.stdout.on("data", (d) => (stdout += d.toString()));
+    child.stdout.on("data", (d) => {
+      buffer += d.toString();
+      let idx: number;
+      while ((idx = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 1);
+        if (!line) continue;
+        try {
+          handleEvent(JSON.parse(line));
+        } catch {
+          /* ignore non-JSON noise */
+        }
+      }
+    });
     child.stderr.on("data", (d) => (stderr += d.toString()));
 
     child.on("error", (err) => {
@@ -176,7 +227,7 @@ export function runClaude(
       clearTimeout(timer);
       clearActive();
       log("claude_spawn_failed", { project: project.alias, error: String(err) });
-      resolve({ ok: false, summary: `Couldn't start Claude Code: ${err.message}`, sessionId: generatedId });
+      resolve({ ok: false, summary: `Couldn't start Claude Code: ${err.message}`, sessionId: resolvedSessionId, relayedAny });
     });
 
     child.on("close", (code) => {
@@ -184,51 +235,49 @@ export function runClaude(
       settled = true;
       clearTimeout(timer);
       clearActive();
-      // Log BOTH streams (not just stderr) - in --output-format json mode Claude writes its
-      // error to stdout, so a stderr-only log hides the real cause.
+
+      // Flush a trailing partial line, if any.
+      const rem = buffer.trim();
+      if (rem) {
+        try {
+          handleEvent(JSON.parse(rem));
+        } catch {
+          /* ignore */
+        }
+      }
+
       log("claude_exit", {
         project: project.alias,
         code,
         cancelled: handle.cancelled,
-        stdoutTail: stdout.slice(-3000),
+        relayedAny,
+        resultSubtype: finalResult?.subtype,
         stderrTail: stderr.slice(-3000),
       });
 
       if (handle.cancelled) {
-        resolve({
-          ok: false,
-          cancelled: true,
-          summary: `Stopped work on "${project.alias}" as requested.`,
-          sessionId: generatedId,
-        });
+        resolve({ ok: false, cancelled: true, summary: `Stopped work on "${project.alias}" as requested.`, sessionId: resolvedSessionId, relayedAny });
         return;
       }
 
-      // Parse stdout regardless of exit code - Claude's JSON result carries is_error + a message.
-      let parsed: any = null;
-      try {
-        parsed = JSON.parse(stdout);
-      } catch {
-        /* not JSON (e.g. an early auth/CLI error printed as plain text) */
-      }
-      const returnedId = parsed?.session_id || generatedId;
-
-      if (code !== 0 || parsed?.is_error || parsed?.subtype === "error") {
+      const isError = code !== 0 || finalResult?.is_error || finalResult?.subtype === "error";
+      if (isError) {
         const detail =
-          (parsed && (parsed.result || parsed.error || parsed.message)) ||
+          finalResult?.result ||
+          finalResult?.error ||
           stderr.trim() ||
-          stdout.trim() ||
           `exited with code ${code}`;
         resolve({
           ok: false,
           summary: `Claude hit an error on "${project.alias}": ${String(detail).trim()}`.slice(0, 1500),
-          sessionId: returnedId,
+          sessionId: resolvedSessionId,
+          relayedAny,
         });
         return;
       }
 
-      const summary = parsed?.result ?? parsed?.summary ?? stdout;
-      resolve({ ok: true, summary: String(summary).trim() || "Done (no summary returned).", sessionId: returnedId });
+      const summary = String(finalResult?.result ?? "").trim();
+      resolve({ ok: true, summary, sessionId: resolvedSessionId, relayedAny });
     });
   });
 }

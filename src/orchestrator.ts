@@ -179,18 +179,27 @@ async function processJob(job: QueuedJob): Promise<void> {
   stateStore.setCurrentTask({ ...job, projectAlias: project.alias, startedAt: new Date().toISOString() });
 
   log("task_started", { from: job.from, project: project.alias, text: job.text });
-  await safeSend(job.from, `On it — working on "${project.alias}": ${job.text}`);
 
   await fetchProjectRepos(project);
 
+  // Relay Claude's own messages to the user as they stream in, in order. We chain the sends so
+  // they arrive sequentially without blocking the stream parser. No hardcoded "on it" ack -
+  // Claude speaks for itself; our own messages are reserved for control/failure states.
+  let sendChain: Promise<void> = Promise.resolve();
+  const relay = (text: string) => {
+    sendChain = sendChain.then(() => safeSend(job.from, text));
+  };
+
   const priorSession = stateStore.getSession(project.alias);
-  const result = await runClaude(job.text, project, priorSession);
+  const result = await runClaude(job.text, project, priorSession, relay);
+  await sendChain; // make sure every streamed message has been sent before we finish up
 
   log("task_finished", {
     from: job.from,
     project: project.alias,
     ok: result.ok,
     cancelled: result.cancelled,
+    relayedAny: result.relayedAny,
   });
 
   // Session bookkeeping: if a RESUME failed (not merely cancelled), drop the stored session so the
@@ -203,7 +212,14 @@ async function processJob(job: QueuedJob): Promise<void> {
   }
 
   if (!result.cancelled) {
-    await safeSend(job.from, result.summary);
+    if (!result.ok) {
+      // Failure fallback - Claude may not have streamed anything before erroring.
+      await safeSend(job.from, result.summary);
+    } else if (!result.relayedAny && result.summary) {
+      // Success but Claude produced no streamed text (e.g. only tool calls) - send the summary.
+      await safeSend(job.from, result.summary);
+    }
+    // Success WITH streamed messages: the final summary was already sent as the last one.
   }
 
   stateStore.setCurrentTask(null);
