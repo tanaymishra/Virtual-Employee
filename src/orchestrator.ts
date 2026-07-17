@@ -10,6 +10,11 @@ import { stateStore, QueuedJob } from "./state";
 // instruction, e.g. "stop, do X instead" -> group 2 captures "do X instead".
 const STOP_PATTERN = /^\s*\/?(stop|cancel|abort)\b[,:\s-]*(.*)$/i;
 
+// Matches the "/new" command ONLY when the message starts with it as a whole word - so a stray
+// "/new" inside a sentence (e.g. "i need a page named /new") does NOT reset the session.
+// Group 1 captures any task text after it, e.g. "/new fixifit: do X".
+const NEW_PATTERN = /^\/new(?:\s+([\s\S]*))?$/i;
+
 // Meta delivers webhooks at-least-once; remember recent message ids to drop redeliveries.
 const recentMessageIds = new Set<string>();
 const RECENT_ID_CAP = 1000;
@@ -51,6 +56,32 @@ export async function handleIncomingMessage(from: string, text: string, messageI
   if (alreadySeen(messageId)) {
     log("message_ignored_duplicate", { from, messageId });
     return;
+  }
+
+  // "/new" - start a fresh Claude session for a project (like /clear in Claude Code).
+  const newMatch = text.match(NEW_PATTERN);
+  if (newMatch) {
+    const rest = newMatch[1]?.trim();
+    if (!rest) {
+      // Bare "/new": reset the currently-active project's session.
+      const last = stateStore.getLastProject();
+      if (last) {
+        stateStore.clearSession(last);
+        log("session_reset", { from, project: last });
+        await safeSend(from, `Started a fresh session for "${last}". Your next message begins a new conversation.`);
+      } else {
+        const aliases = config.projects.map((p) => p.alias).join(", ");
+        await safeSend(from, `No active project yet. Say e.g. "/new ${config.projects[0]?.alias ?? "project"}: <task>". Projects: ${aliases}`);
+      }
+      return;
+    }
+    // "/new <task>": reset that project's session, then run the task fresh.
+    const resolution = resolveProject(rest, stateStore.getLastProject());
+    if (resolution.kind === "resolved") {
+      stateStore.clearSession(resolution.project.alias);
+      log("session_reset", { from, project: resolution.project.alias });
+    }
+    text = rest;
   }
 
   const stopMatch = text.match(STOP_PATTERN);
