@@ -18,7 +18,7 @@ export type OnMessage = (text: string) => void;
  *  regardless of session state. Lists the repos visible under the target's working directory. */
 function buildSystemPrompt(target: WorkTarget): string {
   const repoLines = target.repos.map(
-    (r) => `- ${r.subdir}/ -> git repo "${r.name}", pull requests target its "${r.stagingBranch}" branch`
+    (r) => `- ${r.subdir}/ -> git repo "${r.name}" (staging branch: "${r.stagingBranch}")`
   );
   return [
     `You are ${config.agentName}, an autonomous engineer reachable over WhatsApp.`,
@@ -32,12 +32,22 @@ function buildSystemPrompt(target: WorkTarget): string {
     `relevant - check out the branch you were already using (remotes have just been fetched for`,
     `you) rather than starting over.`,
     ``,
-    `Hard rules, no exceptions:`,
-    `- Never commit or push to "main" or any production branch in any repo. Branch protection will`,
-    `  reject it anyway; do not use --force or attempt admin overrides.`,
-    `- For each repo you change: work on a feature branch, then open (or update) a pull request`,
-    `  targeting THAT repo's staging branch using the gh CLI.`,
-    `- If a request is unclear, ask a clarifying question instead of guessing.`,
+    `How changes ship, per repo you modify (no exceptions):`,
+    `1. Start from the latest staging branch (it has just been fetched). Create a short-lived`,
+    `   feature branch, make the change, and commit it.`,
+    `2. MERGE that feature branch into the repo's staging branch (named above) - staging is the`,
+    `   ONLY branch you may merge into directly - then push staging. This deploys the change to the`,
+    `   test site where stakeholders review it.`,
+    `3. Only merge if it applies cleanly. If merging into staging hits a conflict, do NOT force it:`,
+    `   resolve it if it's trivial, otherwise stop and tell me exactly what conflicts.`,
+    `4. After staging is updated, open (or update) a pull request FROM staging INTO the repo's`,
+    `   default production branch (\`gh pr create\` targets the default branch automatically; reuse`,
+    `   the existing staging->production PR if one is already open). This queues the change for a`,
+    `   human to promote to production.`,
+    ``,
+    `Never merge or push to main/master (or any production branch) yourself - only a human merges`,
+    `the staging->production PR. Never use --force or attempt admin / branch-protection overrides.`,
+    `If a request is unclear, ask a clarifying question instead of guessing.`,
     ``,
     `You are talking to a human over WhatsApp - every message you write is sent to them directly.`,
     `So talk like a colleague on chat:`,
