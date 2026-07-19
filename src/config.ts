@@ -20,6 +20,8 @@ export interface ProjectConfig {
   alias: string;
   path: string;
   repos: MemberRepo[];
+  /** Extra environment variables injected into the Claude subprocess for this project's tasks. */
+  env?: Record<string, string>;
 }
 
 function required(name: string): string {
@@ -57,6 +59,18 @@ function loadProjects(projectsFile: string): ProjectConfig[] {
         if (!repo[field]) {
           throw new Error(
             `Project "${project.alias}" has a repo entry missing "${field}": ${JSON.stringify(repo)}`
+          );
+        }
+      }
+    }
+    if (project.env !== undefined) {
+      if (typeof project.env !== "object" || project.env === null || Array.isArray(project.env)) {
+        throw new Error(`Project "${project.alias}" has an "env" field that is not an object of string values.`);
+      }
+      for (const [key, value] of Object.entries(project.env)) {
+        if (typeof value !== "string") {
+          throw new Error(
+            `Project "${project.alias}" env var "${key}" must be a string, got ${typeof value}.`
           );
         }
       }
@@ -104,6 +118,12 @@ export const config = {
   github: {
     token: process.env.GITHUB_TOKEN || "",
   },
+  // Identity stamped on every commit the agent makes. Optional: when unset, git falls back to
+  // whatever user.name/user.email is configured on the server account.
+  git: {
+    authorName: process.env.GIT_AUTHOR_NAME || "",
+    authorEmail: process.env.GIT_AUTHOR_EMAIL || "",
+  },
   claude: {
     bin: process.env.CLAUDE_BIN || "claude",
     taskTimeoutMs: Number(process.env.CLAUDE_TASK_TIMEOUT_MS || 30 * 60 * 1000),
@@ -134,6 +154,7 @@ export interface WorkTarget {
   repos: MemberRepo[]; // subdir is relative to cwd
   label: string; // for logs / the busy message
   sessionKey: string; // key under which this target's Claude session id is stored
+  env: Record<string, string>; // extra env vars injected into the Claude subprocess
 }
 
 const WORKSPACE_SESSION_KEY = "__workspace__";
@@ -141,6 +162,7 @@ const WORKSPACE_SESSION_KEY = "__workspace__";
 /** Unified mode: the whole workspace, all repos, one shared session. */
 export function workspaceTarget(): WorkTarget {
   const repos: MemberRepo[] = [];
+  const env: Record<string, string> = {};
   for (const project of config.projects) {
     for (const repo of project.repos) {
       const abs = repo.subdir === "." ? project.path : `${project.path}/${repo.subdir}`;
@@ -150,11 +172,20 @@ export function workspaceTarget(): WorkTarget {
         stagingBranch: repo.stagingBranch,
       });
     }
+    // All projects share one session here, so merge every project's env; on a key clash the
+    // project listed later in projects.json wins.
+    Object.assign(env, project.env);
   }
-  return { cwd: config.workspacePath, repos, label: "workspace", sessionKey: WORKSPACE_SESSION_KEY };
+  return { cwd: config.workspacePath, repos, label: "workspace", sessionKey: WORKSPACE_SESSION_KEY, env };
 }
 
 /** Project mode: a single project's folder and its member repos. */
 export function projectTarget(project: ProjectConfig): WorkTarget {
-  return { cwd: project.path, repos: project.repos, label: project.alias, sessionKey: project.alias };
+  return {
+    cwd: project.path,
+    repos: project.repos,
+    label: project.alias,
+    sessionKey: project.alias,
+    env: { ...project.env },
+  };
 }

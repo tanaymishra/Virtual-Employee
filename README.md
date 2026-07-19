@@ -155,7 +155,9 @@ different WhatsApp number, GitHub bot account, or project list without touching 
 | WhatsApp number/credentials | `.env` |
 | Allow-listed sender numbers | `.env` (`ALLOWED_SENDER_NUMBERS`) |
 | GitHub bot token (optional override) | `.env` (`GITHUB_TOKEN`) |
+| Commit author name/email | `.env` (`GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`) |
 | Projects, member repos, subdirs, staging branch names | `config/projects.json` |
+| Per-project env vars injected into Claude tasks | `config/projects.json` (optional `env` object per project) |
 | Per-task timeout | `.env` (`CLAUDE_TASK_TIMEOUT_MS`) |
 
 ## Known limitations (phase 1)

@@ -5,7 +5,11 @@
     "repos": [
       { "name": "tanaymishra/fitdesk-backend", "subdir": "backend", "stagingBranch": "staging" },
       { "name": "tanaymishra/fitdesk-frontend", "subdir": "frontend", "stagingBranch": "staging" }
-    ]
+    ],
+    "env": {
+      "DATABASE_URL": "postgres://user:pass@localhost:5432/fitdesk_dev",
+      "API_BASE_URL": "https://staging.fitdesk.example.com"
+    }
   },
   {
     "alias": "blog",

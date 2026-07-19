@@ -63,10 +63,11 @@ function buildSystemPrompt(target: WorkTarget): string {
  * Builds a minimal environment for the Claude child. Critically, this does NOT forward the
  * WhatsApp secrets (access token, app secret) into a process running with
  * --dangerously-skip-permissions, where a prompt-injection payload could otherwise read and
- * exfiltrate them. Only the GitHub token (if explicitly configured) is passed through; otherwise
+ * exfiltrate them. Only the GitHub token (if explicitly configured) and the target's own
+ * project-level env vars (the "env" field in projects.json) are passed through; otherwise
  * gh uses its own stored auth, reachable via HOME.
  */
-function buildChildEnv(): NodeJS.ProcessEnv {
+function buildChildEnv(target: WorkTarget): NodeJS.ProcessEnv {
   const passthrough = [
     "PATH",
     "HOME",
@@ -98,6 +99,22 @@ function buildChildEnv(): NodeJS.ProcessEnv {
     env.GH_TOKEN = config.github.token;
     env.GITHUB_TOKEN = config.github.token;
   }
+
+  // Commit identity: git reads these env vars directly, so every commit the agent makes is
+  // attributed to the configured person without touching any repo's .git/config.
+  if (config.git.authorName) {
+    env.GIT_AUTHOR_NAME = config.git.authorName;
+    env.GIT_COMMITTER_NAME = config.git.authorName;
+  }
+  if (config.git.authorEmail) {
+    env.GIT_AUTHOR_EMAIL = config.git.authorEmail;
+    env.GIT_COMMITTER_EMAIL = config.git.authorEmail;
+  }
+
+  // Project-specific env vars from projects.json (the "env" field) - e.g. API keys or service
+  // URLs a project's tests/tooling need. Applied before the non-interactive overrides below so
+  // a project can't accidentally re-enable an interactive prompt.
+  Object.assign(env, target.env);
 
   // Nobody is present to answer a prompt, so force every subtool to be non-interactive: any
   // credential prompt, editor, or pager that would otherwise block forever (until the task
@@ -165,7 +182,7 @@ export function runClaude(
   return new Promise((resolve) => {
     const child = spawn(config.claude.bin, args, {
       cwd: target.cwd,
-      env: buildChildEnv(),
+      env: buildChildEnv(target),
       stdio: ["ignore", "pipe", "pipe"],
     });
     const handle = { child, cancelled: false };
