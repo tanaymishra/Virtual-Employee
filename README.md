@@ -145,6 +145,12 @@ Message the WhatsApp number from an allow-listed number, mentioning a project al
 `config/projects.json`, e.g. `fitdesk: fix the broken footer link`. While it's working, send
 `stop` to cancel it, optionally followed by a new instruction.
 
+While a task is running, follow-up messages from the person who started it are folded into the
+same conversation: they run as the very next turn of that session (merged into one message if
+several arrive), so context carries over. Messages from anyone else are not queued: they get a
+brief "I'll message you as soon as I'm free" reply (which doesn't reveal what the current task
+is), and once the agent is free it pings them to ask what they need.
+
 ## Configuration reference
 
 Everything identity-specific lives outside the code so the same service can be repointed to a

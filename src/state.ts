@@ -90,11 +90,33 @@ class StateStore {
   enqueueFront(job: QueuedJob) {
     this.queue.unshift(job);
   }
+  /** Folds text into the most recent queued job from the same sender (so rapid-fire follow-up
+   *  messages become ONE next turn instead of several). Returns false if they have none queued. */
+  appendToLastJobFrom(from: string, text: string): boolean {
+    for (let i = this.queue.length - 1; i >= 0; i--) {
+      if (this.queue[i].from === from) {
+        this.queue[i].text += "\n" + text;
+        return true;
+      }
+    }
+    return false;
+  }
   dequeue(): QueuedJob | undefined {
     return this.queue.shift();
   }
   queueLength(): number {
     return this.queue.length;
+  }
+
+  // --- callers waiting for us to free up (their messages are NOT queued; we ping them when idle) ---
+  private waiting: string[] = [];
+  addWaiting(from: string) {
+    if (!this.waiting.includes(from)) this.waiting.push(from);
+  }
+  drainWaiting(): string[] {
+    const w = this.waiting;
+    this.waiting = [];
+    return w;
   }
 
   // --- per-project Claude sessions ---

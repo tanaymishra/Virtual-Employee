@@ -113,13 +113,32 @@ export async function handleIncomingMessage(from: string, text: string, messageI
   const job: QueuedJob = { from, text, receivedAt: new Date().toISOString() };
 
   if (stateStore.isRunning()) {
-    stateStore.enqueue(job);
     const current = stateStore.getCurrentTask();
-    const desc = current ? `"${current.text}" (${current.projectAlias})` : "another task";
+
+    if (current && current.from === from) {
+      // Follow-up from the person whose task is RUNNING. The in-flight Claude turn can't take
+      // new input mid-stream, so fold this message in as the very next turn of the SAME session:
+      // front of the queue, merged with any other follow-ups they've sent since. Claude then sees
+      // it with full context of the work it just finished.
+      if (!stateStore.appendToLastJobFrom(from, text)) {
+        stateStore.enqueueFront(job);
+      }
+      log("followup_folded_in", { from, text });
+      await safeSend(
+        from,
+        `Got it, I'll fold that in right after the current step. (Send "stop" if you want me to drop what I'm doing instead.)`
+      );
+      return;
+    }
+
+    // Someone else's task is running. Their message is deliberately NOT queued (running a stale
+    // request minutes later without them present is worse than asking again) - we just note who
+    // reached out and ping them once we're free, so they can tell us then.
+    stateStore.addWaiting(from);
+    log("caller_waiting", { from });
     await safeSend(
       from,
-      `Still working on ${desc}. I'll get to yours next (queue position: ${stateStore.queueLength()}). ` +
-        `Send "stop" if you started the current task and want to cancel it.`
+      `I'm in the middle of something right now. I'll message you as soon as I'm free.`
     );
     return;
   }
@@ -133,10 +152,11 @@ async function handleStop(from: string, replacementText: string | undefined): Pr
   if (!current) return; // isRunning() was true but between tasks; nothing concrete to cancel
 
   if (current.from !== from) {
+    stateStore.addWaiting(from);
     await safeSend(
       from,
       `Only the person who started the current task ("${current.projectAlias}") can stop it. ` +
-        `Send your own request and it'll be queued.`
+        `I'll message you as soon as I'm free.`
     );
     return;
   }
@@ -169,6 +189,12 @@ async function runLoop(): Promise<void> {
   } finally {
     stateStore.setCurrentTask(null);
     stateStore.setRunning(false);
+  }
+
+  // Now that we're free, ping everyone who reached out while we were busy so they can send
+  // their request fresh (their earlier message was intentionally not queued).
+  for (const from of stateStore.drainWaiting()) {
+    await safeSend(from, `Hi, I'm free now. What would you like me to do?`);
   }
 }
 
