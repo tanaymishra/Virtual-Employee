@@ -40,7 +40,7 @@ export function createServer() {
 
     const messages = parseIncoming(req.body);
     for (const msg of messages) {
-      handleIncomingMessage(msg.from, msg.text, msg.id).catch((err) => {
+      handleIncomingMessage(msg.from, msg.text, msg.id, msg.media).catch((err) => {
         log("handle_message_failed", { from: msg.from, error: String(err) });
       });
     }

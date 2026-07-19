@@ -1,9 +1,11 @@
+import fs from "fs";
+import path from "path";
 import { config, workspaceTarget, projectTarget, WorkTarget } from "./config";
 import { log } from "./logger";
 import { resolveProject } from "./projectRouter";
 import { runClaude, cancelActive } from "./claudeRunner";
 import { fetchTargetRepos } from "./git";
-import { sendText } from "./whatsapp";
+import { sendText, sendFile, downloadMedia, IncomingMedia } from "./whatsapp";
 import { stateStore, QueuedJob } from "./state";
 
 // Matches "stop"/"cancel"/"abort" (optionally "/stop"), optionally followed by a replacement
@@ -44,8 +46,30 @@ async function safeSend(to: string, body: string) {
   }
 }
 
-export async function handleIncomingMessage(from: string, text: string, messageId?: string): Promise<void> {
-  log("message_received", { from, text, messageId });
+/** Downloads a received WhatsApp file into the inbox dir and returns the message text with the
+ *  saved path appended, so Claude can read/use the file from disk. */
+async function absorbMedia(from: string, text: string, media: IncomingMedia): Promise<string> {
+  const dir = path.resolve(config.inboxDir);
+  fs.mkdirSync(dir, { recursive: true });
+  // Prefer the real filename (documents); otherwise derive an extension from the mime type.
+  const fallbackExt = (media.mimeType.split("/")[1] || "bin").split(";")[0];
+  const rawName = media.filename || `${media.mimeType.split("/")[0]}.${fallbackExt}`;
+  const safeName = rawName.replace(/[^\w.\-]+/g, "_");
+  const dest = path.join(dir, `${Date.now()}-${safeName}`);
+  const bytes = await downloadMedia(media);
+  fs.writeFileSync(dest, bytes);
+  log("media_received", { from, dest, mimeType: media.mimeType, bytes: bytes.length });
+  const note = `[I sent you a file over WhatsApp; it's saved at: ${dest} (${media.mimeType})]`;
+  return text ? `${text}\n${note}` : note;
+}
+
+export async function handleIncomingMessage(
+  from: string,
+  text: string,
+  messageId?: string,
+  media?: IncomingMedia
+): Promise<void> {
+  log("message_received", { from, text, messageId, hasMedia: Boolean(media) });
 
   if (!isAllowed(from)) {
     // Silent: unlisted numbers get no reply, so the bot isn't advertised to strangers.
@@ -56,6 +80,16 @@ export async function handleIncomingMessage(from: string, text: string, messageI
   if (alreadySeen(messageId)) {
     log("message_ignored_duplicate", { from, messageId });
     return;
+  }
+
+  if (media) {
+    try {
+      text = await absorbMedia(from, text, media);
+    } catch (err) {
+      log("media_download_failed", { from, error: String(err) });
+      await safeSend(from, `I couldn't download the file you sent, sorry. Mind sending it again?`);
+      if (!text) return; // nothing else to act on
+    }
   }
 
   // "/new" - start a fresh Claude session (like /clear in Claude Code).
@@ -236,9 +270,21 @@ async function processJob(job: QueuedJob): Promise<void> {
   const relay = (text: string) => {
     sendChain = sendChain.then(() => safeSend(job.from, text));
   };
+  // Files Claude asks to deliver (SEND_FILE: lines) ride the same chain so attachments arrive
+  // in order with the surrounding messages. A failed send becomes an apology text, not a crash.
+  const relayFile = (filePath: string) => {
+    sendChain = sendChain.then(async () => {
+      try {
+        await sendFile(job.from, filePath);
+      } catch (err) {
+        log("send_file_failed", { to: job.from, filePath, error: String(err) });
+        await safeSend(job.from, `(I tried to send you the file ${filePath} but it failed: ${String(err).slice(0, 300)})`);
+      }
+    });
+  };
 
   const priorSession = stateStore.getSession(target.sessionKey);
-  const result = await runClaude(job.text, target, priorSession, relay);
+  const result = await runClaude(job.text, target, priorSession, relay, relayFile);
   await sendChain; // make sure every streamed message has been sent before we finish up
 
   log("task_finished", {

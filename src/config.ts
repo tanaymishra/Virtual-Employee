@@ -139,6 +139,8 @@ export const config = {
   // "project": route each message to a named project (mention its alias), one session per project.
   workspaceMode: (process.env.WORKSPACE_MODE || "unified").toLowerCase() === "project" ? "project" : "unified",
   workspacePath: computeWorkspacePath(),
+  // Where files received over WhatsApp are saved; the saved path is shown to Claude in the message.
+  inboxDir: process.env.INBOX_DIR || "./data/inbox",
   logFile: process.env.LOG_FILE || "./data/virtual-employee.log",
   stateFile: process.env.STATE_FILE || "./data/state.json",
   projects,

@@ -14,6 +14,13 @@ export interface ClaudeResult {
 /** Callback used to relay Claude's own messages to the user as they stream in. */
 export type OnMessage = (text: string) => void;
 
+/** Callback invoked for each SEND_FILE: line Claude emits - delivers that file to the user. */
+export type OnFile = (filePath: string) => void;
+
+// A line of exactly "SEND_FILE: <path>" in Claude's output means "deliver this file to the user
+// as a WhatsApp attachment". Parsed out of the text so the marker itself is never relayed.
+const SEND_FILE_PATTERN = /^\s*SEND_FILE:\s*(\S.*?)\s*$/;
+
 /** The persistent guardrails, injected via --append-system-prompt on every turn so they hold
  *  regardless of session state. Lists the repos visible under the target's working directory. */
 function buildSystemPrompt(target: WorkTarget): string {
@@ -56,6 +63,14 @@ function buildSystemPrompt(target: WorkTarget): string {
     `- When you do take on work: open with a one-line acknowledgement, send short progress notes at`,
     `  meaningful milestones (not every command), and end with a brief summary + the PR URL(s).`,
     `- Keep each message short and conversational; no markdown headings, no step-by-step logs.`,
+    ``,
+    `Files over WhatsApp:`,
+    `- When the human sends you a file (image, PDF, voice note, ...), it's already downloaded and`,
+    `  the message shows its saved path - just read/use that file as part of the task.`,
+    `- To send the human a file yourself (a PDF you generated, a report, an image, ...), write a`,
+    `  line by itself containing exactly: SEND_FILE: /absolute/path/to/file`,
+    `  That file is then delivered to them as a WhatsApp attachment (100MB max). Any surrounding`,
+    `  text is still sent as a normal message; never mention the SEND_FILE marker itself.`,
   ].join("\n");
 }
 
@@ -155,7 +170,8 @@ export function runClaude(
   userText: string,
   target: WorkTarget,
   sessionId: string | null,
-  onMessage: OnMessage
+  onMessage: OnMessage,
+  onFile: OnFile = () => {}
 ): Promise<ClaudeResult> {
   const system = buildSystemPrompt(target);
   const generatedId = sessionId || crypto.randomUUID();
@@ -205,9 +221,24 @@ export function runClaude(
       if (ev?.type === "assistant" && Array.isArray(ev.message?.content)) {
         for (const block of ev.message.content) {
           if (block?.type === "text" && block.text?.trim()) {
-            relayedAny = true;
-            log("claude_message", { target: target.label, text: block.text.slice(0, 400) });
-            onMessage(block.text.trim());
+            // Pull out SEND_FILE: lines (delivered as attachments); relay the rest as text.
+            const kept: string[] = [];
+            for (const line of block.text.split("\n")) {
+              const fileMatch = line.match(SEND_FILE_PATTERN);
+              if (fileMatch) {
+                relayedAny = true;
+                log("claude_send_file", { target: target.label, filePath: fileMatch[1] });
+                onFile(fileMatch[1]);
+              } else {
+                kept.push(line);
+              }
+            }
+            const text = kept.join("\n").trim();
+            if (text) {
+              relayedAny = true;
+              log("claude_message", { target: target.label, text: text.slice(0, 400) });
+              onMessage(text);
+            }
           } else if (block?.type === "tool_use") {
             // Log tool activity for visibility, but don't spam the user with it.
             log("claude_tool", { target: target.label, tool: block.name });
@@ -305,7 +336,13 @@ export function runClaude(
         return;
       }
 
-      const summary = String(finalResult?.result ?? "").trim();
+      // The result text duplicates Claude's final streamed message, so any SEND_FILE lines in it
+      // were already delivered as attachments - strip them so the marker never reaches the user.
+      const summary = String(finalResult?.result ?? "")
+        .split("\n")
+        .filter((line) => !SEND_FILE_PATTERN.test(line))
+        .join("\n")
+        .trim();
       resolve({ ok: true, summary, sessionId: resolvedSessionId, relayedAny });
     });
   });

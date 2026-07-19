@@ -16,6 +16,9 @@ services:
       ALLOWED_SENDER_NUMBERS: ${ALLOWED_SENDER_NUMBERS}
       # --- GitHub bot auth (used for clone/push + gh PRs) ---
       GITHUB_TOKEN: ${GITHUB_TOKEN}
+      # --- Commit identity stamped on the agent's commits (optional) ---
+      GIT_AUTHOR_NAME: ${GIT_AUTHOR_NAME:-}
+      GIT_AUTHOR_EMAIL: ${GIT_AUTHOR_EMAIL:-}
       # --- Claude Code headless auth (from `claude setup-token` on your machine) ---
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN}
       # --- Agent identity & workspace ---
@@ -27,6 +30,7 @@ services:
       PROJECTS_FILE: /app/config/projects.json
       STATE_FILE: /data/state.json
       LOG_FILE: /data/virtual-employee.log
+      INBOX_DIR: /data/inbox
       PORT: "3000"
       CLAUDE_TASK_TIMEOUT_MS: "1800000"
     volumes:

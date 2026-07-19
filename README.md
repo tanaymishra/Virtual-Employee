@@ -151,6 +151,11 @@ several arrive), so context carries over. Messages from anyone else are not queu
 brief "I'll message you as soon as I'm free" reply (which doesn't reveal what the current task
 is), and once the agent is free it pings them to ask what they need.
 
+Files work in both directions. A file sent over WhatsApp (PDF, image, voice note, ...) is
+downloaded into `INBOX_DIR` and its saved path is handed to Claude along with any caption, so
+"here's the new logo" plus an image just works. And when Claude produces a file worth sharing
+(a generated PDF, a report, a screenshot), it can send it back as a WhatsApp attachment.
+
 ## Configuration reference
 
 Everything identity-specific lives outside the code so the same service can be repointed to a
