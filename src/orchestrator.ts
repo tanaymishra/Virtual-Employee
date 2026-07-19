@@ -6,6 +6,7 @@ import { resolveProject } from "./projectRouter";
 import { runClaude, cancelActive } from "./claudeRunner";
 import { fetchTargetRepos } from "./git";
 import { sendText, sendFile, downloadMedia, IncomingMedia } from "./whatsapp";
+import { transcribeAudio } from "./transcribe";
 import { stateStore, QueuedJob } from "./state";
 
 // Matches "stop"/"cancel"/"abort" (optionally "/stop"), optionally followed by a replacement
@@ -59,6 +60,16 @@ async function absorbMedia(from: string, text: string, media: IncomingMedia): Pr
   const bytes = await downloadMedia(media);
   fs.writeFileSync(dest, bytes);
   log("media_received", { from, dest, mimeType: media.mimeType, bytes: bytes.length });
+
+  // Voice notes: transcribe locally (whisper.cpp) so spoken instructions work like typed ones.
+  if (media.mimeType.startsWith("audio/")) {
+    const transcript = await transcribeAudio(dest);
+    if (transcript) {
+      const note = `[Voice note from me, transcribed: "${transcript}"] (audio file saved at ${dest})`;
+      return text ? `${text}\n${note}` : note;
+    }
+  }
+
   const note = `[I sent you a file over WhatsApp; it's saved at: ${dest} (${media.mimeType})]`;
   return text ? `${text}\n${note}` : note;
 }

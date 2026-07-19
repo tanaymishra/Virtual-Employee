@@ -141,6 +141,12 @@ export const config = {
   workspacePath: computeWorkspacePath(),
   // Where files received over WhatsApp are saved; the saved path is shown to Claude in the message.
   inboxDir: process.env.INBOX_DIR || "./data/inbox",
+  // Local speech-to-text for voice notes via whisper.cpp. Both must be set to enable; when
+  // unset (e.g. local dev), voice notes are still saved but arrive untranscribed.
+  whisper: {
+    bin: process.env.WHISPER_BIN || "",
+    model: process.env.WHISPER_MODEL || "",
+  },
   logFile: process.env.LOG_FILE || "./data/virtual-employee.log",
   stateFile: process.env.STATE_FILE || "./data/state.json",
   projects,

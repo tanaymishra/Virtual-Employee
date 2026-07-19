@@ -156,6 +156,11 @@ downloaded into `INBOX_DIR` and its saved path is handed to Claude along with an
 "here's the new logo" plus an image just works. And when Claude produces a file worth sharing
 (a generated PDF, a report, a screenshot), it can send it back as a WhatsApp attachment.
 
+Voice notes are transcribed locally with [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
+(the open-source Whisper `small` multilingual model, built into the Docker image, no API or
+key needed), so a spoken instruction works exactly like a typed one. If transcription is
+unavailable or fails, the audio file is still saved and mentioned to Claude.
+
 ## Configuration reference
 
 Everything identity-specific lives outside the code so the same service can be repointed to a
