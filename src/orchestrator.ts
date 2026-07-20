@@ -7,6 +7,7 @@ import { runClaude, cancelActive } from "./claudeRunner";
 import { fetchTargetRepos } from "./git";
 import { sendText, sendFile, downloadMedia, IncomingMedia } from "./whatsapp";
 import { transcribeAudio } from "./transcribe";
+import { materializeEnvFiles } from "./envFiles";
 import { stateStore, QueuedJob } from "./state";
 
 // Matches "stop"/"cancel"/"abort" (optionally "/stop"), optionally followed by a replacement
@@ -273,6 +274,7 @@ async function processJob(job: QueuedJob): Promise<void> {
   log("task_started", { from: job.from, target: target.label, text: job.text });
 
   await fetchTargetRepos(target);
+  materializeEnvFiles(); // re-drop .env files in case a repo was freshly cloned or the file was lost
 
   // Relay Claude's own messages to the user as they stream in, in order. We chain the sends so
   // they arrive sequentially without blocking the stream parser. No hardcoded "on it" ack -
