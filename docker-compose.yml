@@ -32,6 +32,7 @@ services:
       LOG_FILE: /data/virtual-employee.log
       INBOX_DIR: /data/inbox
       PORT: "3000"
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-opus-4-8}
       CLAUDE_TASK_TIMEOUT_MS: "1800000"
     volumes:
       - ve-data:/data                 # cloned repos + state.json + log

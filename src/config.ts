@@ -126,6 +126,8 @@ export const config = {
   },
   claude: {
     bin: process.env.CLAUDE_BIN || "claude",
+    // Model every task runs on. Defaults to Claude Opus 4.8.
+    model: process.env.CLAUDE_MODEL || "claude-opus-4-8",
     taskTimeoutMs: Number(process.env.CLAUDE_TASK_TIMEOUT_MS || 30 * 60 * 1000),
   },
   server: {
