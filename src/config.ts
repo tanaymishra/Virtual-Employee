@@ -126,8 +126,12 @@ export const config = {
   },
   claude: {
     bin: process.env.CLAUDE_BIN || "claude",
-    // Model every task runs on. Defaults to Claude Opus 4.8.
-    model: process.env.CLAUDE_MODEL || "claude-opus-4-8",
+    // Model every task runs on. Defaults to Claude Opus 5.
+    model: process.env.CLAUDE_MODEL || "claude-opus-5",
+    // How hard the model thinks per turn (low | medium | high | xhigh | max). Defaults to
+    // "xhigh" - these are long, multi-repo coding tasks running unattended, so correctness is
+    // worth more than the extra tokens.
+    effort: process.env.CLAUDE_EFFORT || "xhigh",
     taskTimeoutMs: Number(process.env.CLAUDE_TASK_TIMEOUT_MS || 30 * 60 * 1000),
   },
   server: {
