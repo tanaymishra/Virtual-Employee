@@ -132,7 +132,6 @@ export const config = {
     // "xhigh" - these are long, multi-repo coding tasks running unattended, so correctness is
     // worth more than the extra tokens.
     effort: process.env.CLAUDE_EFFORT || "xhigh",
-    taskTimeoutMs: Number(process.env.CLAUDE_TASK_TIMEOUT_MS || 30 * 60 * 1000),
   },
   server: {
     port: Number(process.env.PORT || 3000),

@@ -278,20 +278,6 @@ export function runClaude(
       }
     };
 
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      child.kill("SIGKILL");
-      clearActive();
-      log("claude_timeout", { target: target.label });
-      resolve({
-        ok: false,
-        summary: `Timed out after ${Math.round(config.claude.taskTimeoutMs / 1000)}s working on ${target.label}.`,
-        sessionId: resolvedSessionId,
-        relayedAny,
-      });
-    }, config.claude.taskTimeoutMs);
-
     child.stdout.on("data", (d) => {
       buffer += d.toString();
       let idx: number;
@@ -311,7 +297,6 @@ export function runClaude(
     child.on("error", (err) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
       clearActive();
       log("claude_spawn_failed", { target: target.label, error: String(err) });
       resolve({ ok: false, summary: `Couldn't start Claude Code: ${err.message}`, sessionId: resolvedSessionId, relayedAny });
@@ -320,7 +305,6 @@ export function runClaude(
     child.on("close", (code) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
       clearActive();
 
       // Flush a trailing partial line, if any.

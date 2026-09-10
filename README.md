@@ -60,8 +60,8 @@ It runs with no human present, so nothing is allowed to block on a prompt:
   `GCM_INTERACTIVE=never` (git/credential-manager error instead of prompting for a password),
   `GIT_EDITOR=true`/`EDITOR`/`VISUAL` (no editor hang on commit messages or rebases), and
   `GIT_PAGER`/`PAGER`/`GH_PAGER=cat` (no pager waiting on a keypress).
-- The per-task timeout (`CLAUDE_TASK_TIMEOUT_MS`, default 30 min) is the final backstop: if
-  something still wedges, it's SIGKILLed and the failure is reported over WhatsApp.
+- There is no wall-clock limit on a task - long jobs run to completion rather than being cut off
+  mid-change. If one wedges, send "stop" over WhatsApp to SIGKILL it.
 
 Because it runs unattended with skip-permissions, it MUST run in the sandboxed devcontainer +
 firewall (the `.devcontainer/` setup at the repo root), so a mistake or a prompt-injection can't
@@ -174,7 +174,6 @@ different WhatsApp number, GitHub bot account, or project list without touching 
 | Commit author name/email | `.env` (`GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`) |
 | Projects, member repos, subdirs, staging branch names | `config/projects.json` |
 | Per-project env vars injected into Claude tasks | `config/projects.json` (optional `env` object per project) |
-| Per-task timeout | `.env` (`CLAUDE_TASK_TIMEOUT_MS`) |
 
 ## Known limitations (phase 1)
 
